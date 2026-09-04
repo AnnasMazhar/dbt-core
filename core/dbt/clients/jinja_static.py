@@ -259,22 +259,44 @@ def statically_parse_unrendered_config(string: str) -> Optional[Dict[str, Any]]:
     return unrendered_config
 
 
-def construct_static_kwarg_value(kwarg) -> str:
+def _literal_value(node: Any) -> Any:
+    """Return the real Python value iff node is a pure literal; else raise TypeError.
+
+    A pure literal is:
+    - Const (str, int, float, bool, None)
+    - List/Tuple/Dict whose elements are recursively pure literals
+
+    Non-literals (Call, Name, Getattr, operators, etc.) raise TypeError so the
+    caller can fall back to source-expression reconstruction.
+    """
+    if isinstance(node, jinja2.nodes.Const):
+        return node.value  # type: ignore[attr-defined]
+    if isinstance(node, jinja2.nodes.List):
+        return [_literal_value(i) for i in node.items]  # type: ignore[attr-defined]
+    if isinstance(node, jinja2.nodes.Tuple):
+        return tuple(_literal_value(i) for i in node.items)  # type: ignore[attr-defined]
+    if isinstance(node, jinja2.nodes.Dict):
+        return {_literal_value(p.key): _literal_value(p.value) for p in node.items}  # type: ignore[attr-defined]
+    raise TypeError(f"Non-literal node: {type(node).__name__}")
+
+
+def construct_static_kwarg_value(kwarg) -> Any:
+    """Extract the value of a config kwarg as a Python object.
+
+    Returns the real Python value for pure literals (str, int, float, bool, None,
+    and containers of literals). Returns a source-expression string for anything
+    containing non-literal nodes (calls, names, operators, etc.).
+    """
     try:
-        # jinja2 nodes define fields dynamically; kw typed Any to avoid attr errors.
-        kw: Any = kwarg
-        kw_val: Any = kw.value
-        # If the final value is a plain string constant, return it without quotes.
-        # Nested string args (e.g. inside env_var) keep their repr() quoting.
-        if isinstance(kw_val, jinja2.nodes.Const):
-            # Re-bind to Any after narrowing so .value access stays untyped.
-            const_val: Any = kw_val
-            if isinstance(const_val.value, str):
-                return const_val.value
-        return _reconstruct_node(kw_val)
-    except Exception:
-        # Sensitive codepath — fall back to the original AST repr on any error
-        return str(kwarg)
+        kw_val: Any = kwarg.value
+        return _literal_value(kw_val)
+    except (TypeError, AttributeError):
+        # Non-literal expression — reconstruct as a readable source string
+        try:
+            return _reconstruct_node(kwarg.value)
+        except Exception:
+            # Sensitive codepath — fall back to the original AST repr on any error
+            return str(kwarg)
 
 
 def _reconstruct_call(n: Any) -> str:

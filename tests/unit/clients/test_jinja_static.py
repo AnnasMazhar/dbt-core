@@ -94,12 +94,12 @@ class TestStaticallyParseUnrenderedConfig:
                 '{{ config(materialized="view") }}',
                 {"materialized": "view"},
             ),
-            # multiple kwargs
+            # multiple kwargs — bool is now a real bool
             (
                 "{{ config(materialized='view', enabled=True) }}",
                 {
                     "materialized": "view",
-                    "enabled": "True",
+                    "enabled": True,
                 },
             ),
             # macro call — string args keep repr() quoting
@@ -122,42 +122,42 @@ class TestStaticallyParseUnrenderedConfig:
                 "{{ config(enabled=var('is_enabled')) }}",
                 {"enabled": "var('is_enabled')"},
             ),
-            # integer constant
+            # integer constant — now returns real int
             (
                 "{{ config(hours_to_expiration=24) }}",
-                {"hours_to_expiration": "24"},
+                {"hours_to_expiration": 24},
             ),
-            # None / Jinja2 `none`
+            # None / Jinja2 `none` — now returns real None
             (
                 "{{ config(full_refresh=none) }}",
-                {"full_refresh": "None"},
+                {"full_refresh": None},
             ),
-            # list literal
+            # list literal — now returns real list
             (
                 "{{ config(tags=['t1', 't2']) }}",
-                {"tags": "['t1', 't2']"},
+                {"tags": ["t1", "t2"]},
             ),
-            # dict literal
+            # dict literal — now returns real dict
             (
                 "{{ config(meta={'owner': 'alice'}) }}",
-                {"meta": "{'owner': 'alice'}"},
+                {"meta": {"owner": "alice"}},
             ),
-            # attribute access
+            # attribute access (expression — stays string)
             (
                 "{{ config(alias=target.name) }}",
                 {"alias": "target.name"},
             ),
-            # comparison expression
+            # comparison expression (stays string)
             (
                 "{{ config(full_refresh=target.name == 'prod') }}",
                 {"full_refresh": "target.name == 'prod'"},
             ),
-            # ~ string concatenation
+            # ~ string concatenation (expression — stays string)
             (
                 "{{ config(alias='prefix_' ~ target.schema) }}",
                 {"alias": "'prefix_' ~ target.schema"},
             ),
-            # not operator
+            # not operator (expression — stays string)
             (
                 "{{ config(enabled=not true) }}",
                 {"enabled": "not True"},
@@ -172,47 +172,47 @@ class TestStaticallyParseUnrenderedConfig:
                 "{{ config() }}",
                 {},
             ),
-            # False boolean
+            # False boolean — now returns real bool
             (
                 "{{ config(enabled=false) }}",
-                {"enabled": "False"},
+                {"enabled": False},
             ),
-            # float constant
+            # float constant — now returns real float
             (
                 "{{ config(some_ratio=0.5) }}",
-                {"some_ratio": "0.5"},
+                {"some_ratio": 0.5},
             ),
-            # negative number (Neg node)
+            # negative number (Neg node) — expression, stays string
             (
                 "{{ config(hours_to_expiration=-1) }}",
                 {"hours_to_expiration": "-1"},
             ),
-            # != comparison
+            # != comparison (stays string)
             (
                 "{{ config(full_refresh=target.name != 'prod') }}",
                 {"full_refresh": "target.name != 'prod'"},
             ),
-            # in operator with list
+            # in operator with list (expression — stays string)
             (
                 "{{ config(enabled=target.name in ['prod', 'staging']) }}",
                 {"enabled": "target.name in ['prod', 'staging']"},
             ),
-            # and operator
+            # and operator (expression — stays string)
             (
                 "{{ config(enabled=var('x') and true) }}",
                 {"enabled": "var('x') and True"},
             ),
-            # or operator
+            # or operator (expression — stays string)
             (
                 "{{ config(enabled=var('x') or false) }}",
                 {"enabled": "var('x') or False"},
             ),
-            # list of dicts (BigQuery grants pattern)
+            # list of dicts (BigQuery grants pattern) — now returns real list of dicts
             (
                 "{{ config(grant_access_to=[{'project': 'p', 'dataset': 'd'}]) }}",
-                {"grant_access_to": "[{'project': 'p', 'dataset': 'd'}]"},
+                {"grant_access_to": [{"project": "p", "dataset": "d"}]},
             ),
-            # getitem access
+            # getitem access (expression — stays string)
             (
                 "{{ config(alias=var('aliases')['my_model']) }}",
                 {"alias": "var('aliases')['my_model']"},
@@ -233,6 +233,63 @@ class TestStaticallyParseUnrenderedConfig:
     )
     def test_statically_parse_unrendered_config_no_config_call(self, expression):
         assert statically_parse_unrendered_config(expression) is None
+
+
+class TestStaticallyParseUnrenderedConfigLiteralTypes:
+    """Regression tests for GH #16133: literal config values must preserve their real type."""
+
+    def test_preserves_literal_list(self):
+        # GH #16133: literal list config values must keep their real type so
+        # state:modified does not flag unchanged models
+        result = statically_parse_unrendered_config(
+            "{{ config(cluster_by=['id']) }}\nselect 1 as id"
+        )
+        assert result == {"cluster_by": ["id"]}
+        assert isinstance(result["cluster_by"], list)
+
+    def test_preserves_literal_dict(self):
+        result = statically_parse_unrendered_config(
+            "{{ config(grants={'select': ['user']}) }}\nselect 1 as id"
+        )
+        assert result == {"grants": {"select": ["user"]}}
+        assert isinstance(result["grants"], dict)
+
+    def test_preserves_non_str_scalar_int(self):
+        result = statically_parse_unrendered_config("{{ config(version=3) }}\nselect 1 as id")
+        assert result == {"version": 3}
+        assert isinstance(result["version"], int)
+
+    def test_preserves_non_str_scalar_bool(self):
+        result = statically_parse_unrendered_config("{{ config(enabled=True) }}")
+        assert result == {"enabled": True}
+        assert isinstance(result["enabled"], bool)
+
+    def test_preserves_non_str_scalar_none(self):
+        result = statically_parse_unrendered_config("{{ config(full_refresh=none) }}")
+        assert result == {"full_refresh": None}
+        assert result["full_refresh"] is None
+
+    def test_preserves_list_of_dicts(self):
+        # BigQuery grants pattern
+        result = statically_parse_unrendered_config(
+            "{{ config(grant_access_to=[{'project': 'p', 'dataset': 'd'}]) }}"
+        )
+        assert result == {"grant_access_to": [{"project": "p", "dataset": "d"}]}
+        assert isinstance(result["grant_access_to"], list)
+        assert isinstance(result["grant_access_to"][0], dict)
+
+    def test_preserves_nested_list_in_dict(self):
+        result = statically_parse_unrendered_config("{{ config(meta={'tags': ['a', 'b']}) }}")
+        assert result == {"meta": {"tags": ["a", "b"]}}
+        assert isinstance(result["meta"]["tags"], list)
+
+    def test_mixed_literal_expression_stays_string(self):
+        # List containing a var() call must remain a string
+        result = statically_parse_unrendered_config(
+            "{{ config(cluster_by=['id', var('extra')]) }}"
+        )
+        assert result == {"cluster_by": "['id', var('extra')]"}
+        assert isinstance(result["cluster_by"], str)
 
 
 @pytest.mark.parametrize(
